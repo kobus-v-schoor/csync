@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 import argparse
+import os
 import sys
 import ipaddress
 import socket
@@ -12,7 +13,7 @@ import threading
 MSG_SIZE_HEADER = 4 # message size is 8 bytes
 MSG_RECV_CHUNK_SIZE = 1024 # message receive buffer size
 
-# level 4: packets
+# level 4: packets, config
 # level 3: sockets, packets headers
 # level 2: debug
 # level 1: informational
@@ -150,6 +151,55 @@ def rcv_message(sock):
 def rcv_file(sock, filename):
     pass
 
+def get_config():
+    global args
+
+    log("attempting to read config", level=2)
+
+    # create config file if it doesn't exist
+    if not os.path.isfile(args.conf):
+        open(args.conf, 'w').close()
+
+    config = {}
+    with open(args.conf, 'r') as conf_file:
+        cur_sec = None
+        line_num = 0
+        for line in conf_file.readlines():
+            line_num += 1
+            line = line.strip()
+            if not line:
+                continue
+            if line[0] == '#':
+                continue
+            if cur_sec is None or line[0] == '[':
+                if line[0] != '[':
+                    log("invalid config file, file listed without parent: line no",
+                            line_num, level=0)
+                    raise RuntimeError
+                else:
+                    if line[-1] != ']':
+                        log("invalid config file, closing bracket for parent",
+                                "not found: line no", line_num, level=0)
+                        raise RuntimeError
+                    cur_sec = line[1:-1].strip()
+                    if not cur_sec:
+                        log("invalid config file, parent cannot be an empty:",
+                                "line no", line_num, level=0)
+                        raise RuntimeError
+                    if config.get(cur_sec, None):
+                        logf("invalid config file, duplicate parent: line no",
+                                line_num, level=0)
+                        raise RuntimeError
+
+                    config[cur_sec] = []
+                    continue
+
+            config[cur_sec].append(line)
+
+    log("config successfully read", level=2)
+    log("config:", config, level=4)
+    return config
+
 def run_server():
     global args
 
@@ -167,6 +217,13 @@ def run_server():
 
 def run_client():
     global args
+
+    try:
+        config = get_config()
+    except RuntimeError:
+        log("unable to read config file, aborting...", level=0)
+        sys.exit(1)
+        return
 
     try:
         sock = sock_manager.connect(args.ip, args.port)
@@ -190,6 +247,8 @@ def valid_ip(ip):
 
 parser = argparse.ArgumentParser(epilog='Long options can be abbreviated if '
         'the abbreviation is unambiguous')
+parser.add_argument('--conf', default="{}/.config/csync".format(os.environ['HOME']),
+        help="config file to use")
 parser.add_argument('--no-ssh', action='store_true', help='do not use ssh tunneling (INSECURE)')
 parser.add_argument('--port', default=8200, type=int, help='csync port')
 parser.add_argument('ip', nargs='?', default='0.0.0.0', type=valid_ip)
