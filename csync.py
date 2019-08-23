@@ -8,6 +8,8 @@ import socket
 import atexit
 import json
 import threading
+import hashlib
+import pickle
 
 # protocol settings
 MSG_SIZE_HEADER = 4 # message size is 8 bytes
@@ -200,6 +202,72 @@ def get_config():
     log("config:", config, level=4)
     return config
 
+def file_md5(fname):
+    md5 = hashlib.md5()
+    with open(fname, 'rb') as f:
+        for chunk in iter(lambda: f.read(4906), b''):
+            md5.update(chunk)
+    return md5.hexdigest()
+
+def get_index(paths):
+    global args
+
+    if not type(paths) is list:
+        paths = [paths]
+
+    def build_index(path):
+        index = {}
+
+        if args.md5:
+            stamp = lambda f: file_md5(f)
+        else:
+            stamp = lambda f: os.stat(f).st_mtime
+
+        for root, dir, files in os.walk(path):
+            for f in files:
+                fname = os.path.join(root, f)
+                index[fname] = stamp(fname)
+
+        return index
+
+    index = {}
+
+    if not args.force_index and os.path.isfile(args.cache):
+        try:
+            with open(args.cache, 'r+b') as f:
+                index = pickle.load(f)
+            log("index loaded from cache")
+        except pickle.UnpicklingError:
+            log("cache file corrupt, rebuilding index", level=0)
+            os.remove(args.cache)
+            index = {}
+
+    for path in paths:
+        if index.get(path, None):
+            continue
+        log("building index for", path)
+        index[path] = build_index(path)
+
+    log("index:", index, level=4)
+
+    return index
+
+def save_index(index):
+    global args
+
+    log("saving index")
+
+    cachedir = os.path.dirname(args.cache)
+    try:
+        if not os.path.isdir(cachedir):
+            os.makedirs(cachedir)
+        with open(args.cache, 'w+b') as f:
+            pickle.dump(index, f)
+    except pickle.PicklingError:
+        log("unable to save index cache, aborting cache", level=0)
+        return
+    log("index cache successfully saved")
+
 def run_server():
     global args
 
@@ -213,7 +281,6 @@ def run_server():
         sock_manager.register(client_sock)
         server = Server(client_sock)
         server.start()
-
 
 def run_client():
     global args
@@ -247,8 +314,12 @@ def valid_ip(ip):
 
 parser = argparse.ArgumentParser(epilog='Long options can be abbreviated if '
         'the abbreviation is unambiguous')
+parser.add_argument('--cache', default='{}/.cache/csync'.format(os.environ['HOME']),
+        help='cache file for indexing')
 parser.add_argument('--conf', default="{}/.config/csync".format(os.environ['HOME']),
         help="config file to use")
+parser.add_argument('--force-index', action='store_true', help='force recreation of index')
+parser.add_argument('--md5', action='store_true', help='use md5 for file comparison')
 parser.add_argument('--no-ssh', action='store_true', help='do not use ssh tunneling (INSECURE)')
 parser.add_argument('--port', default=8200, type=int, help='csync port')
 parser.add_argument('ip', nargs='?', default='0.0.0.0', type=valid_ip)
