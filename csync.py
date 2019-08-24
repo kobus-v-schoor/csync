@@ -76,17 +76,34 @@ sock_manager = SockManager()
 atexit.register(sock_manager.cleanup)
 
 class Server(threading.Thread):
-    def __init__(self, client_sock, **kwargs):
+    def __init__(self, client_sock, index, **kwargs):
         super().__init__(**kwargs)
         self.client_sock = client_sock
+        self.index = index
 
     def run(self):
-        log("spawned server to handle", self.client_sock.getpeername())
+        client_ip = self.client_sock.getpeername()
+        sock = self.client_sock
+        log("spawned server to handle", client_ip)
 
         try:
-            msg = rcv_message(self.client_sock)
+            log("waiting for index from", client_ip)
+            client_index = rcv_message(sock)
+
+            log("index received from", client_ip)
+            log("index ", client_ip, ":", client_index, level=4)
+
+            # self.index = {'apps': {'apps_folder': {'apps_folder/qwe': 1566586394.0629375, 'apps_folder/asd': 1566587177.2076123, 'apps_folder/test/file2': 1566585693.8323767, 'apps_folder/test/file1': 1566585692.8923955}}, 'files': {'files_folder': {'files_folder/dfg': 1566584744.1343198, 'files_folder/zxc': 1566584744.1343198}}}
+            # self.index = {'apps': {}, 'files': {}}
+            # self.index = {'apps': {'apps_folder': {}}, 'files': {'files_folder': {}}}
+
+            print(self.index)
+            print(client_index)
+            print(gen_patch(self.index, client_index))
+
+
         except ConnectionError:
-            log("unable to receive message from {}, stopping server".format(
+            log("connection error with {}, stopping server".format(
                     self.client_sock.getpeername()), level=0)
             sock_manager.close(self.client_sock)
             return
@@ -159,48 +176,69 @@ def get_config():
     log("attempting to read config", level=2)
 
     # create config file if it doesn't exist
+    if not os.path.isdir(os.path.dirname(args.conf)):
+        os.makedirs(os.path.dirname(args.conf))
     if not os.path.isfile(args.conf):
         open(args.conf, 'w').close()
 
-    config = {}
-    with open(args.conf, 'r') as conf_file:
-        cur_sec = None
-        line_num = 0
-        for line in conf_file.readlines():
-            line_num += 1
-            line = line.strip()
-            if not line:
-                continue
-            if line[0] == '#':
-                continue
-            if cur_sec is None or line[0] == '[':
-                if line[0] != '[':
-                    log("invalid config file, file listed without parent: line no",
-                            line_num, level=0)
-                    raise RuntimeError
-                else:
-                    if line[-1] != ']':
-                        log("invalid config file, closing bracket for parent",
-                                "not found: line no", line_num, level=0)
-                        raise RuntimeError
-                    cur_sec = line[1:-1].strip()
-                    if not cur_sec:
-                        log("invalid config file, parent cannot be an empty:",
-                                "line no", line_num, level=0)
-                        raise RuntimeError
-                    if config.get(cur_sec, None):
-                        logf("invalid config file, duplicate parent: line no",
+    try:
+        config = {}
+        with open(args.conf, 'r') as conf_file:
+            cur_sec = None
+            line_num = 0
+            for line in conf_file.readlines():
+                line_num += 1
+                line = line.strip()
+                if not line:
+                    continue
+                if line[0] == '#':
+                    continue
+                if cur_sec is None or line[0] == '[':
+                    if line[0] != '[':
+                        log("invalid config file, file listed without parent: line no",
                                 line_num, level=0)
                         raise RuntimeError
+                    else:
+                        if line[-1] != ']':
+                            log("invalid config file, closing bracket for parent",
+                                    "not found: line no", line_num, level=0)
+                            raise RuntimeError
+                        cur_sec = line[1:-1].strip()
+                        if not cur_sec:
+                            log("invalid config file, parent cannot be an empty:",
+                                    "line no", line_num, level=0)
+                            raise RuntimeError
+                        if config.get(cur_sec, None):
+                            logf("invalid config file, duplicate parent: line no",
+                                    line_num, level=0)
+                            raise RuntimeError
 
-                    config[cur_sec] = []
-                    continue
+                        config[cur_sec] = []
+                        continue
 
-            config[cur_sec].append(line)
+                config[cur_sec].append(line)
+    except RuntimeError:
+        log("unable to read config file, aborting...", level=0)
+        sys.exit(1)
+        return
 
-    log("config successfully read", level=2)
+    log("config successfully read")
     log("config:", config, level=4)
     return config
+
+def save_config(config):
+    global args
+
+    log("attempting to save config file")
+
+    if not os.path.isdir(os.path.dirname(args.conf)):
+        os.makedirs(os.path.dirname(args.conf))
+
+    with open(args.conf, 'w') as cf:
+        for parent in config:
+            cf.write("[{}]\n".format(parent))
+            for path in config[parent]:
+                cf.write("{}\n".format(path))
 
 def file_md5(fname):
     md5 = hashlib.md5()
@@ -209,11 +247,10 @@ def file_md5(fname):
             md5.update(chunk)
     return md5.hexdigest()
 
-def get_index(paths):
+def get_index(config):
     global args
 
-    if not type(paths) is list:
-        paths = [paths]
+    log("building index")
 
     def build_index(path):
         index = {}
@@ -223,10 +260,11 @@ def get_index(paths):
         else:
             stamp = lambda f: os.stat(f).st_mtime
 
+        path = os.path.join(os.environ['HOME'], path)
         for root, dir, files in os.walk(path):
             for f in files:
                 fname = os.path.join(root, f)
-                index[fname] = stamp(fname)
+                index[os.path.relpath(fname, os.environ['HOME'])] = stamp(fname)
 
         return index
 
@@ -242,11 +280,14 @@ def get_index(paths):
             os.remove(args.cache)
             index = {}
 
-    for path in paths:
-        if index.get(path, None):
-            continue
-        log("building index for", path)
-        index[path] = build_index(path)
+    for parent in config:
+        index[parent] = {}
+        for path in config[parent]:
+            # if path is already in index from cache, skip it
+            if index[parent].get(path, None):
+                continue
+            log("building index for", path)
+            index[parent][path] = build_index(path)
 
     log("index:", index, level=4)
 
@@ -268,8 +309,38 @@ def save_index(index):
         return
     log("index cache successfully saved")
 
+# generates a "patch" to go from the old index to the new
+def gen_patch(old_index, new_index):
+    patch = {}
+
+    # find additions
+    patch['add'] = {}
+    for parent in new_index:
+        if not parent in old_index:
+            patch['add'][parent] = new_index[parent]
+            continue
+
+        patch['add'][parent] = {}
+        for root_path in new_index[parent]:
+            if not root_path in old_index[parent]:
+                patch['add'][parent][root_path] = new_index[parent][root_path]
+                continue
+
+            patch['add'][parent][root_path] = {}
+            for path in new_index[parent][root_path]:
+                if not path in old_index[parent][root_path]:
+                    patch['add'][parent][root_path][path] = new_index[parent][root_path][path]
+
+    # find modifications
+    # find deletions
+
+    return patch
+
 def run_server():
     global args
+
+    config = get_config()
+    index = get_index(config)
 
     log("attempting to listen on", args.ip, "port", args.port)
     sock = sock_manager.listen(args.ip, args.port)
@@ -279,18 +350,13 @@ def run_server():
         client_sock, client_address = sock.accept()
         log("accepted incoming connection from", client_address, level=1)
         sock_manager.register(client_sock)
-        server = Server(client_sock)
+        server = Server(client_sock, index)
         server.start()
 
 def run_client():
     global args
 
-    try:
-        config = get_config()
-    except RuntimeError:
-        log("unable to read config file, aborting...", level=0)
-        sys.exit(1)
-        return
+    config = get_config()
 
     try:
         sock = sock_manager.connect(args.ip, args.port)
@@ -301,7 +367,11 @@ def run_client():
 
     log("successfully connected to server at", sock.getpeername(), level=1)
 
-    send_msg(sock, {'qwe':10, 20: 'zxc'})
+    index = get_index(config)
+
+    log("sending index to server")
+    send_msg(sock, index)
+
 
 # if a valid fqdn is given it will still get resolved and used - if not, raise
 # an exception
