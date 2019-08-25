@@ -93,14 +93,7 @@ class Server(threading.Thread):
             log("index received from", client_ip)
             log("index ", client_ip, ":", client_index, level=4)
 
-            # self.index = {'apps': {'apps_folder': {'apps_folder/qwe': 1566586394.0629375, 'apps_folder/asd': 1566587177.2076123, 'apps_folder/test/file2': 1566585693.8323767, 'apps_folder/test/file1': 1566585692.8923955}}, 'files': {'files_folder': {'files_folder/dfg': 1566584744.1343198, 'files_folder/zxc': 1566584744.1343198}}}
-            # self.index = {'apps': {}, 'files': {}}
-            # self.index = {'apps': {'apps_folder': {}}, 'files': {'files_folder': {}}}
-
-            print(self.index)
-            print(client_index)
-            print(gen_patch(self.index, client_index))
-
+            # print(gen_patch(self.index, client_index))
 
         except ConnectionError:
             log("connection error with {}, stopping server".format(
@@ -108,7 +101,6 @@ class Server(threading.Thread):
             sock_manager.close(self.client_sock)
             return
 
-        # print(msg)
         sock_manager.close(self.client_sock)
 
 
@@ -243,7 +235,7 @@ def save_config(config):
 def file_md5(fname):
     md5 = hashlib.md5()
     with open(fname, 'rb') as f:
-        for chunk in iter(lambda: f.read(4906), b''):
+        for chunk in iter(lambda: f.read(4096), b''):
             md5.update(chunk)
     return md5.hexdigest()
 
@@ -311,28 +303,78 @@ def save_index(index):
 
 # generates a "patch" to go from the old index to the new
 def gen_patch(old_index, new_index):
+    global args
+
+    if args.md5:
+        def modded(old_path, new_path):
+            return old_path != new_path
+    else:
+        def modded(old_path, new_path):
+            return new_path > old_path
+
     patch = {}
 
-    # find additions
     patch['add'] = {}
+    patch['mod'] = {}
+
     for parent in new_index:
+        # if parent is new, just add the whole thing
         if not parent in old_index:
             patch['add'][parent] = new_index[parent]
             continue
 
         patch['add'][parent] = {}
+        patch['mod'][parent] = {}
         for root_path in new_index[parent]:
+            # if root_path is new, just add the whole thing
             if not root_path in old_index[parent]:
                 patch['add'][parent][root_path] = new_index[parent][root_path]
                 continue
 
             patch['add'][parent][root_path] = {}
+            patch['mod'][parent][root_path] = {}
             for path in new_index[parent][root_path]:
-                if not path in old_index[parent][root_path]:
+                # if path is new, add it
+                # if path is modified, mod it
+                if path in old_index[parent][root_path]:
+                    if modded(old_index[parent][root_path][path],
+                            new_index[parent][root_path][path]):
+                        patch['mod'][parent][root_path][path] = new_index[parent][root_path][path]
+                else:
                     patch['add'][parent][root_path][path] = new_index[parent][root_path][path]
 
-    # find modifications
-    # find deletions
+
+    patch['del'] = {}
+
+    for parent in old_index:
+        # non-existent parents don't get deleted as they might not be used on
+        # client
+        if not parent in new_index:
+            continue
+
+        patch['del'][parent] = {}
+
+        for root_path in old_index[parent]:
+            patch['del'][parent][root_path] = {}
+
+            # if root path doesn't exist in new index, remove the whole thing
+            if not root_path in new_index[parent]:
+                patch['del'][parent][root_path] = old_index[parent][root_path]
+                continue
+
+            # if path doesn't exist in new index, remove it
+            for path in old_index[parent][root_path]:
+                if not path in new_index[parent][root_path]:
+                    patch['del'][parent][root_path][path] = \
+                            old_index[parent][root_path][path]
+
+    # remove empty entries
+    for op in patch:
+        for parent in patch[op]:
+            pd = patch[op][parent]
+            patch[op][parent] = {rp: pd[rp] for rp in pd if pd[rp]}
+        od = patch[op]
+        patch[op] = {pa : od[pa] for pa in od if od[pa]}
 
     return patch
 
